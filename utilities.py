@@ -54,4 +54,4 @@ def gdi_20t_engine_vol_calc(theta_off_tdc_deg, offset: float=0.0):
            - 0.5*np.power( (2*L_meter/stroke_meter)**2 - np.power(np.sin(theta_rad), 2), 0.5)
            )
     volume_cubic_meter = coff * 500e-6
-    return volume_cubic_meter       
+    return volume_cubic_meter    
