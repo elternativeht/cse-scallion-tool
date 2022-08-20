@@ -71,19 +71,31 @@ def scope_data_read(main_filename: Path, aux_filename: Path,
     aux_df = generic_scope_read(aux_filename, channel_dict=channel_dict_aux, main_scope=False)
     aux_df.reset_index(inplace=True)
 
+    main_key_set = set(channel_dict_main.keys())
+    aux_key_set = set(channel_dict_aux.keys())
+    result = list(main_key_set.intersection(aux_key_set))
+    assert len(result) == 1
+    result = result[0]
+
     dt = main_df.loc[1, 'time'] - main_df.loc[0, 'time']
-    main_df['index'] = main_df['index'] - main_df.loc[main_df['cylinder3'].argmax(),'index']
-    aux_df['index'] = aux_df['index'] - aux_df.loc[aux_df['cylinder3'].argmax(),'index']
+
+    peak_pressure_loc = main_df[result].argmax()
+
+
+    time_datum = main_df.loc[peak_pressure_loc,'time']
+
+    main_df['index'] = main_df['index'] - main_df.loc[peak_pressure_loc,'index']
+    aux_df['index'] = aux_df['index'] - aux_df.loc[peak_pressure_loc,'index']
 
     res = main_df.merge(aux_df, on='index')
 
-    res.drop(['index','time_x','time_y','cylinder3_y'],inplace=True, axis=1)
+    res.drop(['index','time_y', result + '_y'],inplace=True, axis=1)
 
     res.reset_index(inplace=True)
 
-    res.rename(columns = {'cylinder3_x':'cylinder3','index':'time'}, inplace=True)
+    res.rename(columns = {result + '_x': result,'time_x': 'time'}, inplace=True)
 
-    res['time'] = res['time'] * dt
+    res['time'] = res['time'] - time_datum
 
     return res
 
@@ -141,3 +153,67 @@ def signal_validation(z_peak_loc: np.array, a_binary_ttl: np.array, error_lim: f
         print(f'Current maximum error tolerance: {error_lim}')
         print(f'Passed the validation?: {valid_flag}' )
     return valid_flag, result
+
+def res_pulses_process(res_df: pd.DataFrame, max_rpm: float = 1200.0, 
+                       flood_ratio: float = 0.9, a_process_classic: bool = True,
+                       error_threshold: float = 5.0, verbose: bool = False,
+                       ignore_error: bool = False):
+    
+    
+    z_peak_loc, z_binary_ttl = z_pulse_processing(max_rpm=max_rpm, 
+                                                  time_signal=res_df['time'],
+                                                  z_signal=res_df['z_pulse'],
+                                                  flood_ratio=flood_ratio)
+    if a_process_classic:
+        a_peak_loc, a_binary_ttl = a_pulse_processing_classic(res_df['a_pulse'])
+    else: 
+        a_peak_loc, a_binary_ttl = a_pulse_processing_scipy_extrema(max_rpm, res_df['time'], res_df['a_pulse'])
+    valid_bool, result = signal_validation(z_peak_loc = z_peak_loc, 
+                                           a_binary_ttl = a_binary_ttl, 
+                                           error_lim = error_threshold, 
+                                           verbose=verbose)
+    if (not valid_bool) and (not ignore_error):
+        raise ValueError('Current scope data validation failed and was not ignored.')
+    
+    res_df['cum_cad'] = np.cumsum(a_binary_ttl * 0.5)  # cumulative CAD deg
+    res_df['z_binary'] = z_binary_ttl
+    res_df['a_binary'] = a_binary_ttl
+
+    return res_df, z_peak_loc, a_peak_loc 
+
+
+
+def cad_pegging(res_df: pd.DataFrame, leading_cylinder_num: int, 
+                z_peak_loc: np.array, a_binary_ttl: np.array):
+    
+    # as firing order is fixed, only leading_cylinder_str is required
+    cad_offset_lead = [-162.0, 18.0 ,18.0, -162.0]
+
+    offset = cad_offset_lead[leading_cylinder_num - 1]
+
+    idx = res_df.loc[res_df['time']==0].index
+    
+    target_cum_cad = res_df.loc[idx,'cum_cad'].values[0] + 40
+    if abs(offset)<40:
+        target_cum_cad += 40.0
+    right_cushion_idx = res_df[res_df['cum_cad']==target_cum_cad].index.tolist()[0]
+
+
+    # TODO: make cranking data selection possible;
+    # reference: previous version :
+    # # location of the location of Z pulse of interest
+    # sync_index = sync_pt_location(p_lead, p_follow, z_peaks, motorflag9=motor_flag, forced_move_flag=forced_move)
+    #   if motorflag9 and (x.shape[0] == 0 or forced_move_flag):
+    #        rest_zpeaks = Zpeaks[Zpeaks > F_peaks]
+    #        rest_zpeaks = rest_zpeaks[1:] # updated Jan 27 2022, potentially skipping z-pulse not neighboring cyl l
+    #        i = 0 
+    #        while i < (rest_zpeaks.shape[0] - 1) and p_lead[rest_zpeaks[i]] < 0.5:
+    #            i += 2  # updated Jan 27 2022, skipping the middle Z pulse not close to current 2 cylinders
+    #        return rest_zpeaks[i]
+
+    x = z_peak_loc[z_peak_loc < right_cushion_idx][-1]
+
+    res_df['cum_cad'] = res_df['cum_cad'] - (res_df.loc[x, 'cum_cad'] - cad_offset_lead[leading_cylinder_num])
+    
+    return res_df
+
