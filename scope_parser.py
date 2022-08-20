@@ -1,3 +1,4 @@
+from itertools import cycle
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -175,7 +176,7 @@ def res_pulses_process(res_df: pd.DataFrame, max_rpm: float = 1200.0,
     if (not valid_bool) and (not ignore_error):
         raise ValueError('Current scope data validation failed and was not ignored.')
     
-    res_df['cum_cad'] = np.cumsum(a_binary_ttl * 0.5)  # cumulative CAD deg
+    res_df['cumu_cad'] = np.cumsum(a_binary_ttl * 0.5)  # cumulative CAD deg
     res_df['z_binary'] = z_binary_ttl
     res_df['a_binary'] = a_binary_ttl
 
@@ -183,20 +184,25 @@ def res_pulses_process(res_df: pd.DataFrame, max_rpm: float = 1200.0,
 
 
 
-def cad_pegging(res_df: pd.DataFrame, leading_cylinder_num: int, 
+def cad_pegging(res_df: pd.DataFrame, peg_cylinder_num: int, 
                 z_peak_loc: np.array, a_binary_ttl: np.array):
+    
+    '''
+    Return the data frame with cumu_cad pegged.
+    0 cumulative CAD located at the pegged cylinder TDC
+    '''
     
     # as firing order is fixed, only leading_cylinder_str is required
     cad_offset_lead = [-162.0, 18.0 ,18.0, -162.0]
 
-    offset = cad_offset_lead[leading_cylinder_num - 1]
+    offset = cad_offset_lead[peg_cylinder_num - 1]
 
     idx = res_df.loc[res_df['time']==0].index
     
-    target_cum_cad = res_df.loc[idx,'cum_cad'].values[0] + 40
+    target_cumu_cad = res_df.loc[idx,'cumu_cad'].values[0] + 40
     if abs(offset)<40:
-        target_cum_cad += 40.0
-    right_cushion_idx = res_df[res_df['cum_cad']==target_cum_cad].index.tolist()[0]
+        target_cumu_cad += 40.0
+    right_cushion_idx = res_df[res_df['cumu_cad']==target_cumu_cad].index.tolist()[0]
 
 
     # TODO: make cranking data selection possible;
@@ -213,7 +219,32 @@ def cad_pegging(res_df: pd.DataFrame, leading_cylinder_num: int,
 
     x = z_peak_loc[z_peak_loc < right_cushion_idx][-1]
 
-    res_df['cum_cad'] = res_df['cum_cad'] - (res_df.loc[x, 'cum_cad'] - cad_offset_lead[leading_cylinder_num])
+    res_df['cumu_cad'] = res_df['cumu_cad'] - (res_df.loc[x, 'cumu_cad'] - cad_offset_lead[peg_cylinder_num])
     
     return res_df
 
+def roi_select(pegged_df: pd.DataFrame, cycle_num: float = 1, cycle_start_offset: float = 0, cylinder_start: int = 3):
+    # both cycle_num and cycle_start_offset can only be pure integer or float numbers ending with 0.25, 0.5, 0.75 (quartiles) 
+    # cycle index 0 is the cycle starting with the cylinder TDC where 0 cumulative CAD is located
+    # cylinder start specifies the starting cylinder (for saving purpose)
+    #
+    def data_validation(argument: float) -> bool:
+        cur_res = argument - np.floor(argument)
+        if abs(cur_res) < 1e-9:
+            return True
+        i = 3
+        while i > 0:
+            if np.abs(cur_res * 4 - i) < 1e-9:
+                return True
+            i -= 1
+        return False
+
+    assert data_validation(cycle_num)
+    assert data_validation(cycle_start_offset)
+    
+    cumu_cad_start = -360.0 + cycle_start_offset * 360.0 
+    cumu_cad_end = cumu_cad_start + 720.0 * cycle_num
+
+    res_df = res_df[((res_df['cumu_cad']>=cumu_cad_start)&(res_df['cumu_cad']<cumu_cad_end))]
+
+    return res_df
