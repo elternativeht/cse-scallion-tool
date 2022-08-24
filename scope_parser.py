@@ -37,7 +37,7 @@ def cranking_data_load(file_path: Path):
     motor_p1 = motor_p1 / cnt
     return motor_p3, motor_p4, motor_p2, motor_p1
 
-def generic_scope_read(filename: Path, channel_dict: Dict, main_scope: bool = True):
+def generic_scope_reader(filename: Path, channel_dict: Dict):
 
     #channel_dict = {'ch3': '2', 'ch4': '1', 'z_pulse': '3', 'a_pulse': '4'}
     # key: signal name
@@ -56,13 +56,13 @@ def generic_scope_read(filename: Path, channel_dict: Dict, main_scope: bool = Tr
 
     return rowread
 
-def scope_data_read(main_filename: Path, aux_filename: Path, 
+def scope_data_readin(main_filename: Path, aux_filename: Path, 
                     channel_dict_main: dict = {'1':'cylinder4','2':'cylinder3', '3': 'z_pulse', '4': 'a_pulse'},
                     channel_dict_aux: dict = {'1':'cylinder1','2':'cylinder2','3':'cylinder3','4':'frp'},
                    ):
-    main_df = generic_scope_read(main_filename, channel_dict=channel_dict_main, main_scope=True)
+    main_df = generic_scope_reader(main_filename, channel_dict=channel_dict_main, main_scope=True)
     main_df.reset_index(inplace=True)
-    aux_df = generic_scope_read(aux_filename, channel_dict=channel_dict_aux, main_scope=False)
+    aux_df = generic_scope_reader(aux_filename, channel_dict=channel_dict_aux, main_scope=False)
     aux_df.reset_index(inplace=True)
 
     main_key_set = set(channel_dict_main.values())
@@ -148,7 +148,7 @@ def signal_validation(z_peak_loc: np.array, a_binary_ttl: np.array, error_lim: f
         print(f'Passed the validation?: {valid_flag}' )
     return valid_flag, result
 
-def res_pulses_process(res_df: pd.DataFrame, max_rpm: float = 1200.0, 
+def pulses_processing(res_df: pd.DataFrame, max_rpm: float = 1200.0, 
                        flood_ratio: float = 0.9, a_process_classic: bool = True,
                        error_threshold: float = 5.0, verbose: bool = False,
                        ignore_error: bool = False):
@@ -217,7 +217,7 @@ def cad_pegging(res_df: pd.DataFrame, peg_cylinder_num: int, z_peak_loc: np.arra
 
     return res_df
 
-def roi_select(res_df: pd.DataFrame, cycle_num: float = 1, cycle_start_offset: float = 0):
+def roi_selection(res_df: pd.DataFrame, cycle_num: float = 1, cycle_start_offset: float = 0):
     # both cycle_num and cycle_start_offset can only be pure integer or float numbers ending with 0.25, 0.5, 0.75 (quartiles) 
     # cycle index 0 is the cycle starting with the cylinder TDC where 0 cumulative CAD is located
     # cylinder start specifies the starting cylinder (for saving purpose)
@@ -286,7 +286,7 @@ def roi_select(res_df: pd.DataFrame, cycle_num: float = 1, cycle_start_offset: f
 
     return res_df
 
-def pressure_volt2bar(res_df, scale=10.0):
+def pressure_signal_conversion(res_df, scale=10.0):
 
     window_start = -349.0 
     window_end = -300.0    
@@ -313,19 +313,19 @@ def pressure_volt2bar(res_df, scale=10.0):
     res_df['frp'] = res_df['frp'] * 65 - 32.5
     return res_df
 
-def time2cad_conversion(res_df:pd.DataFrame, cad_key: str='cumu_cad',conversion_rule='first'):
+def cad_resampling(res_df:pd.DataFrame, cad_key: str='cumu_cad',resampling_rule='first'):
     res_df_groupby = res_df.groupby(cad_key)
-    assert conversion_rule in ['first','mean','last','median']
-    if conversion_rule == 'first':
+    assert resampling_rule in ['first','mean','last','median']
+    if resampling_rule == 'first':
         return res_df_groupby.first()
-    elif conversion_rule == 'mean':
+    elif resampling_rule == 'mean':
         return res_df_groupby.mean()
-    elif conversion_rule == 'last':
+    elif resampling_rule == 'last':
         return res_df_groupby.last()
-    elif conversion_rule == 'median':
+    elif resampling_rule == 'median':
         return res_df.median()
     else:
-        raise ValueError('conversion rule input invalid')
+        raise ValueError('Resampling rule input invalid')
 
 
 
