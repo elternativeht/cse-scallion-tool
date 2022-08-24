@@ -1,4 +1,6 @@
 from itertools import cycle
+from lib2to3.pytree import convert
+from logging import root
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -41,39 +43,30 @@ def generic_scope_read(filename: Path, channel_dict: Dict, main_scope: bool = Tr
     # key: signal name
     # value: signal channel
 
-    pd_dict = {}
-
+    name_col = ['time']
+    for i in range(1,5):
+        str_key = channel_dict[str(i)]
+        name_col.append(str_key)
     rowread = pd.read_csv(
         filename,
         sep=',',
         header=36,
-        names=['time', '1', '2', '3', '4'],
+        names=name_col,
         usecols=(0, 1, 3, 5, 7))  # read in raw csv file, skip the repeating time columns
-    
-    if main_scope:
-        key_list = ['cylinder3', 'cylinder4', 'z_pulse','a_pulse']
-    else:
-        key_list = ['cylinder3', 'cylinder2', 'cylinder1', 'frp']
-    
-    pd_dict['time'] = rowread['time']
 
-    for key_ in key_list:
-        assert key_ in list(channel_dict.keys())
-        pd_dict[key_] = rowread[channel_dict[key_]]
-
-    return pd.DataFrame(pd_dict)
+    return rowread
 
 def scope_data_read(main_filename: Path, aux_filename: Path, 
-                    channel_dict_main: dict = {'cylinder3': '2', 'cylinder4': '1', 'z_pulse': '3', 'a_pulse': '4'},
-                    channel_dict_aux: dict = {'cylinder3': '3', 'cylinder2': '2', 'cylinder1': '1', 'frp': '4'},
+                    channel_dict_main: dict = {'1':'cylinder4','2':'cylinder3', '3': 'z_pulse', '4': 'a_pulse'},
+                    channel_dict_aux: dict = {'1':'cylinder1','2':'cylinder2','3':'cylinder3','4':'frp'},
                    ):
     main_df = generic_scope_read(main_filename, channel_dict=channel_dict_main, main_scope=True)
     main_df.reset_index(inplace=True)
     aux_df = generic_scope_read(aux_filename, channel_dict=channel_dict_aux, main_scope=False)
     aux_df.reset_index(inplace=True)
 
-    main_key_set = set(channel_dict_main.keys())
-    aux_key_set = set(channel_dict_aux.keys())
+    main_key_set = set(channel_dict_main.values())
+    aux_key_set = set(channel_dict_aux.values())
     result = list(main_key_set.intersection(aux_key_set))
     assert len(result) == 1
     result = result[0]
@@ -81,12 +74,12 @@ def scope_data_read(main_filename: Path, aux_filename: Path,
     dt = main_df.loc[1, 'time'] - main_df.loc[0, 'time']
 
     peak_pressure_loc = main_df[result].argmax()
-
+    peak_pressure_loc_aux = aux_df[result].argmax()
 
     time_datum = main_df.loc[peak_pressure_loc,'time']
 
     main_df['index'] = main_df['index'] - main_df.loc[peak_pressure_loc,'index']
-    aux_df['index'] = aux_df['index'] - aux_df.loc[peak_pressure_loc,'index']
+    aux_df['index'] = aux_df['index'] - aux_df.loc[peak_pressure_loc_aux,'index']
 
     res = main_df.merge(aux_df, on='index')
 
@@ -184,8 +177,7 @@ def res_pulses_process(res_df: pd.DataFrame, max_rpm: float = 1200.0,
 
 
 
-def cad_pegging(res_df: pd.DataFrame, peg_cylinder_num: int, 
-                z_peak_loc: np.array, a_binary_ttl: np.array):
+def cad_pegging(res_df: pd.DataFrame, peg_cylinder_num: int, z_peak_loc: np.array):
     
     '''
     Return the data frame with cumu_cad pegged.
@@ -199,8 +191,8 @@ def cad_pegging(res_df: pd.DataFrame, peg_cylinder_num: int,
 
     idx = res_df.loc[res_df['time']==0].index
     
-    target_cumu_cad = res_df.loc[idx,'cumu_cad'].values[0] + 40
-    if abs(offset)<40:
+    target_cumu_cad = res_df.loc[idx,'cumu_cad'].values[0]
+    if offset>0 and offset<40:
         target_cumu_cad += 40.0
     right_cushion_idx = res_df[res_df['cumu_cad']==target_cumu_cad].index.tolist()[0]
 
@@ -219,15 +211,21 @@ def cad_pegging(res_df: pd.DataFrame, peg_cylinder_num: int,
 
     x = z_peak_loc[z_peak_loc < right_cushion_idx][-1]
 
-    res_df['cumu_cad'] = res_df['cumu_cad'] - (res_df.loc[x, 'cumu_cad'] - cad_offset_lead[peg_cylinder_num])
+    res_df['cumu_cad'] = res_df['cumu_cad'] - (res_df.loc[x, 'cumu_cad'] - cad_offset_lead[peg_cylinder_num - 1])
     
+    res_df['pegged_cylinder'] = np.ones(res_df.shape[0],dtype=int) * peg_cylinder_num 
+
     return res_df
 
-def roi_select(pegged_df: pd.DataFrame, cycle_num: float = 1, cycle_start_offset: float = 0, cylinder_start: int = 3):
+def roi_select(res_df: pd.DataFrame, cycle_num: float = 1, cycle_start_offset: float = 0):
     # both cycle_num and cycle_start_offset can only be pure integer or float numbers ending with 0.25, 0.5, 0.75 (quartiles) 
     # cycle index 0 is the cycle starting with the cylinder TDC where 0 cumulative CAD is located
     # cylinder start specifies the starting cylinder (for saving purpose)
     #
+    peg_cylinder = res_df.loc[0, 'pegged_cylinder']
+    next2fire = {3:4, 4:2, 2:1, 1:3}
+    previous2fire = {1:2, 3:1, 4:3, 2:4}
+
     def data_validation(argument: float) -> bool:
         cur_res = argument - np.floor(argument)
         if abs(cur_res) < 1e-9:
@@ -239,12 +237,95 @@ def roi_select(pegged_df: pd.DataFrame, cycle_num: float = 1, cycle_start_offset
             i -= 1
         return False
 
+    def find_starting_cylinder(start_offset: float, peg_cylinder: int) -> int:
+        refer_dict = next2fire if start_offset > 0 else previous2fire
+        cylinder_start = peg_cylinder
+        res = start_offset - np.floor(start_offset) if start_offset >= 0 else start_offset - np.ceil(start_offset)
+        res = np.abs(res)
+        while res > 1e-9:
+            cylinder_start = refer_dict[cylinder_start]
+            res -= 0.25
+        return cylinder_start
+        
+    def conv_cumu_cad_2_cycle_num(cumu_cad, cutoff_start):
+        if cumu_cad < cutoff_start:
+            return 0
+        else:
+            return np.ceil((cumu_cad - cutoff_start)/720.0)
+    def conv_cumu_cad_2_cad(cumu_cad, cutoff_start):
+        if cumu_cad < cutoff_start:
+            res = (cutoff_start - cumu_cad)
+            res -= np.floor((cutoff_start - cumu_cad)/720.0) * 720.0
+            return 360.0 - res
+        else:
+            res = (cumu_cad - cutoff_start)
+            quo = np.floor((cumu_cad - cutoff_start)/720.0)
+            res -= quo * 720.0
+            return res - 360.0
+
+    assert cycle_num > 0
     assert data_validation(cycle_num)
     assert data_validation(cycle_start_offset)
     
-    cumu_cad_start = -360.0 + cycle_start_offset * 360.0 
-    cumu_cad_end = cumu_cad_start + 720.0 * cycle_num
+    cumu_cad_start = -360 + cycle_start_offset * 720.0 
+    cumu_cad_end = cumu_cad_start + 720.0 * cycle_num + 540.0
 
     res_df = res_df[((res_df['cumu_cad']>=cumu_cad_start)&(res_df['cumu_cad']<cumu_cad_end))]
 
+    start_cylinder = find_starting_cylinder(cycle_start_offset, peg_cylinder)
+    cur_cylinder = start_cylinder
+    for i in range(4):
+        print(f'current cylinder is cyl {cur_cylinder}')
+        start_offset_cumu_cad = cumu_cad_start + i * 180.0
+        print(f'current offset is cyl {start_offset_cumu_cad}')
+        cur_cycle_num_series = res_df['cumu_cad'].apply(conv_cumu_cad_2_cycle_num,args=(start_offset_cumu_cad,))
+        cur_cad_series = res_df['cumu_cad'].apply(conv_cumu_cad_2_cad,args=(start_offset_cumu_cad,))
+        res_df['cylinder' + str(cur_cylinder) + '_cad'] = cur_cad_series.loc[:]
+        res_df['cylinder' + str(cur_cylinder) + '_cycle_num'] = cur_cycle_num_series.loc[:]
+        cur_cylinder = next2fire[cur_cylinder]
+
     return res_df
+
+def pressure_volt2bar(res_df, scale=10.0):
+
+    window_start = -349.0 
+    window_end = -300.0    
+
+    for cyl_index in range(4,0,-1):
+        cur_cad_key = 'cylinder' + str(cyl_index) + '_cad'
+        cur_cycle_num_key = 'cylinder' + str(cyl_index) + '_cycle_num'
+        cur_set = set(res_df[cur_cycle_num_key])
+        cur_set.remove(0.0)
+        cycle_num_list = list(cur_set)
+        cycle_num_list.sort()
+        print(cyl_index, cur_cad_key, cur_cycle_num_key,cycle_num_list)
+        for cur_cycle_index in cycle_num_list:
+            try:
+                cur_peg_val = res_df[(res_df[cur_cycle_num_key]==cur_cycle_index) &
+                                            (res_df[cur_cad_key]>=window_start) & 
+                                            (res_df[cur_cad_key]<window_end)
+                                           ]['cylinder'+str(cyl_index)].mean()
+                idx = res_df[res_df[cur_cycle_num_key]==cur_cycle_index].index
+                res_df.loc[idx, 'cylinder'+str(cyl_index)] -= cur_peg_val
+            except:
+                print(f'not pegging cycle number {cur_cycle_index} for cylinder {cyl_index}')
+        res_df.loc[:,'cylinder'+str(cyl_index)] *= scale
+    res_df['frp'] = res_df['frp'] * 65 - 32.5
+    return res_df
+
+def time2cad_conversion(res_df:pd.DataFrame, cad_key: str='cumu_cad',conversion_rule='first'):
+    res_df_groupby = res_df.groupby(cad_key)
+    assert conversion_rule in ['first','mean','last','median']
+    if conversion_rule == 'first':
+        return res_df_groupby.first()
+    elif conversion_rule == 'mean':
+        return res_df_groupby.mean()
+    elif conversion_rule == 'last':
+        return res_df_groupby.last()
+    elif conversion_rule == 'median':
+        return res_df.median()
+    else:
+        raise ValueError('conversion rule input invalid')
+
+
+
